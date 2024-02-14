@@ -1,52 +1,118 @@
-
 import { getAddress } from "@zetachain/protocol-contracts";
-import { task } from "hardhat/config";
+import { ethers } from "ethers";
+import { task, types } from "hardhat/config";
 import { HardhatRuntimeEnvironment } from "hardhat/types";
-import ZRC20 from "@zetachain/protocol-contracts/abi/zevm/ZRC20.sol/ZRC20.json";
+import { getSupportedNetworks } from "@zetachain/networks";
+
+const contractName = "CrossChainMessage";
+
 const main = async (args: any, hre: HardhatRuntimeEnvironment) => {
-if (hre.network.name !== "zeta_testnet") {
-throw new Error(
-'🚨 Please use the "zeta_testnet" network to deploy to ZetaChain.'
-);
-}
-const [signer] = await hre.ethers.getSigners();
-if (signer === undefined) {
-throw new Error(
-`Wallet not found. Please, run "npx hardhat account --save" or set PRIVATE_KEY env variable (for example, in a .env file)`
-);
-}
-const systemContract = getAddress("systemContract", "zeta_testnet");
-const factory = await hre.ethers.getContractFactory("Staking");
-let symbol, chainID;
-if (args.chain === "btc_testnet") {
-symbol = "BTC";
-chainID = 18332;
-} else {
-const zrc20 = getAddress("zrc20", args.chain);
-const contract = new hre.ethers.Contract(zrc20, ZRC20.abi, signer);
-symbol = await contract.symbol();
-chainID = hre.config.networks[args.chain]?.chainId;
-if (chainID === undefined) {
-throw new Error(`🚨 Chain ${args.chain} not found in hardhat config.`);
-}
-}
-const contract = await factory.deploy(
-`Staking rewards for ${symbol}`,
-`R${symbol.toUpperCase()}`,
-chainID,
-systemContract
-);
-await contract.deployed();
-if (args.json) {
-console.log(JSON.stringify(contract));
-} else {
-console.log(`🔑 Using account: ${signer.address}
-🚀 Successfully deployed contract on ZetaChain.
-📜 Contract address: ${contract.address}
-🌍 Explorer: https://athens3.explorer.zetachain.com/address/${contract.address}
-`);
-}
+  const networks = args.networks.split(",");
+  const contracts: { [key: string]: string } = {};
+  await Promise.all(
+    networks.map(async (networkName: string) => {
+      contracts[networkName] = await deployContract(
+        hre,
+        networkName,
+        args.json,
+        args.gasLimit
+      );
+    })
+  );
+
+  for (const source in contracts) {
+    await setInteractors(hre, source, contracts, args.json, args.gasLimit);
+  }
+
+  if (args.json) {
+    console.log(JSON.stringify(contracts, null, 2));
+  }
 };
+
+const initWallet = (hre: HardhatRuntimeEnvironment, networkName: string) => {
+  const { url } = hre.config.networks[networkName] as any;
+  const provider = new ethers.providers.JsonRpcProvider(url);
+  const wallet = new ethers.Wallet(process.env.PRIVATE_KEY as string, provider);
+
+  return wallet;
+};
+
+const deployContract = async (
+  hre: HardhatRuntimeEnvironment,
+  networkName: string,
+  json: boolean = false,
+  gasLimit: number
+) => {
+  const wallet = initWallet(hre, networkName);
+
+  const connector = getAddress("connector", networkName as any);
+  const zetaToken = getAddress("zetaToken", networkName as any);
+  const zetaTokenConsumerUniV2 = getAddress(
+    "zetaTokenConsumerUniV2",
+    networkName as any
+  );
+  const zetaTokenConsumerUniV3 = getAddress(
+    "zetaTokenConsumerUniV3",
+    networkName as any
+  );
+
+  const { abi, bytecode } = await hre.artifacts.readArtifact(contractName);
+  const factory = new ethers.ContractFactory(abi, bytecode, wallet);
+  const contract = await factory.deploy(connector, zetaToken, zetaTokenConsumerUniV2 || zetaTokenConsumerUniV3, { gasLimit });
+
+  await contract.deployed();
+  if (!json) {
+    console.log(`
+🚀 Successfully deployed contract on ${networkName}.
+📜 Contract address: ${contract.address}`);
+  }
+  return contract.address;
+};
+
+const setInteractors = async (
+  hre: HardhatRuntimeEnvironment,
+  source: string,
+  contracts: { [key: string]: string },
+  json: boolean = false,
+  gasLimit: number
+) => {
+  if (!json) {
+    console.log(`
+🔗 Setting interactors for a contract on ${source}`);
+  }
+  const wallet = initWallet(hre, source);
+
+  const { abi, bytecode } = await hre.artifacts.readArtifact(contractName);
+  const factory = new ethers.ContractFactory(abi, bytecode, wallet);
+  const contract = factory.attach(contracts[source]);
+
+  for (const counterparty in contracts) {
+    if (counterparty === source) continue;
+
+    const counterpartyContract = hre.ethers.utils.solidityPack(
+      ["address"],
+      [contracts[counterparty]]
+    );
+    const chainId = hre.config.networks[counterparty].chainId;
+    await (
+      await contract.setInteractorByChainId(chainId, counterpartyContract, {
+        gasLimit,
+      })
+    ).wait();
+    if (!json) {
+      console.log(
+        `✅ Interactor address for ${chainId} (${counterparty}) is set to ${counterpartyContract}`
+      );
+    }
+  }
+};
+
 task("deploy", "Deploy the contract", main)
-.addParam("chain", "Chain ID (use btc_testnet for Bitcoin Testnet)")
-.addFlag("json", "Output in JSON");
+  .addParam(
+    "networks",
+    `Comma separated list of networks to deploy to (e.g. ${getSupportedNetworks(
+      "ccm"
+    )})`
+  )
+  .addOptionalParam("gasLimit", "Gas limit", 10000000, types.int)
+  .addFlag("json", "Output JSON");
