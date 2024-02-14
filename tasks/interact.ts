@@ -1,57 +1,41 @@
 import { task } from "hardhat/config";
 import { HardhatRuntimeEnvironment } from "hardhat/types";
-import { parseUnits } from "@ethersproject/units";
-import { getAddress } from "@zetachain/protocol-contracts";
-import ERC20Custody from "@zetachain/protocol-contracts/abi/evm/ERC20Custody.sol/ERC20Custody.json";
-import { prepareData } from "@zetachain/toolkit/helpers";
-import { utils, ethers } from "ethers";
-import ERC20 from "@openzeppelin/contracts/build/contracts/ERC20.json";
+import { parseEther } from "@ethersproject/units";
 
 const main = async (args: any, hre: HardhatRuntimeEnvironment) => {
   const [signer] = await hre.ethers.getSigners();
 
-  const data = prepareData(
-    args.contract,
-    [],
-    []
-  );
+  const factory = await hre.ethers.getContractFactory("CrossChainMessage");
+  const contract = factory.attach(args.contract);
 
-  let tx;
-
-  if (args.token) {
-    const custodyAddress = getAddress("erc20Custody", hre.network.name as any);
-    const custodyContract = new ethers.Contract(
-      custodyAddress,
-      ERC20Custody.abi,
-      signer
-    );
-    const tokenContract = new ethers.Contract(args.token, ERC20.abi, signer);
-    const decimals = await tokenContract.decimals();
-    const value = parseUnits(args.amount, decimals);
-    const approve = await tokenContract.approve(custodyAddress, value);
-    await approve.wait();
-
-    tx = await custodyContract.deposit(signer.address, args.token, value, data);
-    tx.wait();
-  } else {
-    const value = parseUnits(args.amount, 18);
-    const to = getAddress("tss", hre.network.name as any);
-    tx = await signer.sendTransaction({ data, to, value });
+  const destination = hre.config.networks[args.destination]?.chainId;
+  if (destination === undefined) {
+    throw new Error(`${args.destination} is not a valid destination chain`);
   }
 
+  const paramMessage = args.message;
+
+  const value = parseEther(args.amount);
+
+
+  const tx = await contract
+    .connect(signer)
+    .sendMessage(destination, paramMessage, { value });
+
+  const receipt = await tx.wait();
   if (args.json) {
     console.log(JSON.stringify(tx, null, 2));
   } else {
     console.log(`🔑 Using account: ${signer.address}\n`);
-
-    console.log(`🚀 Successfully broadcasted a token transfer transaction on ${hre.network.name} network.
-📝 Transaction hash: ${tx.hash}
-  `);
+    console.log(`✅ The transaction has been broadcasted to ${hre.network.name}
+📝 Transaction hash: ${receipt.transactionHash}
+`);
   }
 };
 
-task("interact", "Interact with the contract", main)
-  .addParam("contract", "The address of the withdraw contract on ZetaChain")
-  .addParam("amount", "Amount of tokens to send")
-  .addOptionalParam("token", "The address of the token to send")
-  .addFlag("json", "Output in JSON")
+task("interact", "Sends a message from one chain to another.", main)
+  .addFlag("json", "Output JSON")
+  .addParam("contract", "Contract address")
+  .addParam("amount", "Token amount to send")
+  .addParam("destination", "Destination chain")
+  .addParam("message", "string")
